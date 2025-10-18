@@ -8,7 +8,7 @@ WORKDIR /usr/src/app
 
 # paketlarni nusxalash va o'rnatish
 COPY package.json package-lock.json* ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 # kodni nusxalash
 COPY . .

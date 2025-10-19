@@ -1,5 +1,5 @@
 # 1. Node.js bazasi
-FROM node:18-bullseye
+FROM node:20-bullseye
 
 # 2. Ishchi papka
 WORKDIR /usr/src/app

@@ -1,15 +1,23 @@
-# Dockerfile
-FROM node:20
+FROM node:18-bullseye
 
-# Kerakli kutubxonalarni o‘rnatamiz
-RUN apt-get update && apt-get install -y ffmpeg yt-dlp && mkdir -p /data/files
+# ffmpeg va kerakli paketlarni o'rnatish
+RUN apt-get update && apt-get install -y ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY package*.json ./
-RUN npm install
+# ishchi papka
+WORKDIR /usr/src/app
+
+# paketlarni nusxalash va o'rnatish
+COPY package.json package-lock.json* ./
+RUN npm install --production
+
+# kodni nusxalash
 COPY . .
 
+# vaqtinchalik fayllar uchun katalog
+RUN mkdir -p /data/files
+VOLUME ["/data/files"]
+
 ENV PORT=3000
-ENV STORAGE_DIR=/data/files
+EXPOSE 3000
 
 CMD ["npm", "start"]

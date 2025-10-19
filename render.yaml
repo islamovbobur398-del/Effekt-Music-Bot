@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: effekt-music-bot
+    env: docker
+    plan: free
+    branch: main
+    autoDeploy: true

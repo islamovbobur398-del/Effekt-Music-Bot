@@ -1,23 +1,28 @@
-# 1. Rasm
+# 1. Node.js bazasi
 FROM node:18-bullseye
 
 # 2. Ishchi papka
 WORKDIR /usr/src/app
 
-# 3. Kerakli tizim paketlari
+# 3. Kerakli tizim paketlarini o‘rnatish
 RUN apt-get update && \
     apt-get install -y ffmpeg python3 python3-pip && \
-    pip3 install --break-system-packages yt-dlp && \
+    python3 -m venv /venv && \
+    /venv/bin/pip install yt-dlp && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 4. Fayllarni konteynerga nusxalash
+# 4. Muhit o‘zgaruvchilari
+ENV PATH="/venv/bin:$PATH"
+
+# 5. Node.js modullarini o‘rnatish
 COPY package*.json ./
 RUN npm install
 
+# 6. Kodni konteynerga ko‘chirish
 COPY . .
 
-# 5. Port
+# 7. Port ochish
 EXPOSE 10000
 
-# 6. Botni ishga tushirish
+# 8. Botni ishga tushirish
 CMD ["node", "index.js"]

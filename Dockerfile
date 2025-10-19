@@ -1,23 +1,15 @@
-FROM node:18-bullseye
+# Dockerfile
+FROM node:20
 
-# ffmpeg va kerakli paketlarni o'rnatish
-RUN apt-get update && apt-get install -y ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*
+# Kerakli kutubxonalarni o‘rnatamiz
+RUN apt-get update && apt-get install -y ffmpeg yt-dlp && mkdir -p /data/files
 
-# ishchi papka
-WORKDIR /usr/src/app
-
-# paketlarni nusxalash va o'rnatish
-COPY package.json package-lock.json* ./
-RUN npm install --omit=dev
-
-# kodni nusxalash
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
 COPY . .
 
-# vaqtinchalik fayllar uchun katalog
-RUN mkdir -p /data/files
-VOLUME ["/data/files"]
-
 ENV PORT=3000
-EXPOSE 10000
+ENV STORAGE_DIR=/data/files
 
 CMD ["npm", "start"]

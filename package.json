@@ -1,8 +1,8 @@
 {
-  "name": "music-bot",
+  "name": "yt-telegram-music-bot",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
+  "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
@@ -10,9 +10,8 @@
     "axios": "^1.4.0",
     "better-sqlite3": "^8.4.0",
     "express": "^4.18.2",
-    "form-data": "^4.0.0",
     "fluent-ffmpeg": "^2.1.2",
-    "node-fetch": "^3.3.2",
-    "node-telegram-bot-api": "^0.61.0"
+    "form-data": "^4.0.0",
+    "yt-search": "^2.10.6"
   }
 }

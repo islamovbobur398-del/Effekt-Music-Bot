@@ -6,41 +6,47 @@ import path from "path";
 import FormData from "form-data";
 import Database from "better-sqlite3";
 import ffmpeg from "fluent-ffmpeg";
+import { promisify } from "util";
+import { exec as execCb } from "child_process";
+import yts from "yt-search";
+
+const exec = promisify(execCb);
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
-const BASE_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const PORT = process.env.PORT || 10000;
-const STORAGE_DIR = process.env.STORAGE_DIR || "/data/files"; // Docker konteynerda mavjud bo'lishi kerak
+const STORAGE_DIR = process.env.STORAGE_DIR || "/data/files";
 
-if (!BOT_TOKEN || !SERPAPI_KEY) {
-  console.error("BOT_TOKEN va SERPAPI_KEY environment variables ni o'rnat !");
+if (!BOT_TOKEN) {
+  console.error("❌ BOT_TOKEN environment variable not set!");
   process.exit(1);
 }
 
-// papkani yarat
 if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
 
-// SQLite DB (fayl storage)
+const BASE_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
+
+// --- Database setup ---
 const dbPath = path.join(STORAGE_DIR, "bot.db");
 const db = new Database(dbPath);
 
-// Jadvalni yaratamiz: users, search_variants, files
+// tables: search_variants (stores last searches per chat) and files (original/effect files)
 db.exec(`
 CREATE TABLE IF NOT EXISTS search_variants (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT NOT NULL,
   idx INTEGER NOT NULL,
   title TEXT,
+  video_id TEXT,
   url TEXT,
   created_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_chat ON search_variants(chat_id);
+
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT,
-  kind TEXT, -- original|effect
-  effect TEXT, -- null or 'zal'|'bass'|'8d'
+  kind TEXT,    -- original | effect
+  effect TEXT,  -- null | 'zal'|'bass'|'8d'
   title TEXT,
   filepath TEXT,
   created_at INTEGER
@@ -48,105 +54,118 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_chat ON files(chat_id);
 `);
 
-const insertVariant = db.prepare(`INSERT INTO search_variants (chat_id, idx, title, url, created_at) VALUES (?, ?, ?, ?, ?)`);
+const insertVariant = db.prepare(`INSERT INTO search_variants (chat_id, idx, title, video_id, url, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
 const clearVariantsForChat = db.prepare(`DELETE FROM search_variants WHERE chat_id = ?`);
-const getVariantsForChat = db.prepare(`SELECT idx, title, url FROM search_variants WHERE chat_id = ? ORDER BY idx ASC`);
-const getVariant = db.prepare(`SELECT idx, title, url FROM search_variants WHERE chat_id = ? AND idx = ? LIMIT 1`);
+const getVariantsForChat = db.prepare(`SELECT idx, title, video_id, url FROM search_variants WHERE chat_id = ? ORDER BY idx ASC`);
+const getVariant = db.prepare(`SELECT idx, title, video_id, url FROM search_variants WHERE chat_id = ? AND idx = ? LIMIT 1`);
 
 const insertFile = db.prepare(`INSERT INTO files (chat_id, kind, effect, title, filepath, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
-const getFile = db.prepare(`SELECT * FROM files WHERE chat_id = ? AND kind = 'original' ORDER BY created_at DESC LIMIT 1`);
-const getFileByPath = db.prepare(`SELECT * FROM files WHERE filepath = ? LIMIT 1`);
-const deleteOldFiles = db.prepare(`SELECT * FROM files WHERE created_at <= ?`);
+const getLatestOriginal = db.prepare(`SELECT * FROM files WHERE chat_id = ? AND kind = 'original' ORDER BY created_at DESC LIMIT 1`);
+const getFilesOlderThan = db.prepare(`SELECT * FROM files WHERE created_at <= ?`);
+const deleteFileById = db.prepare(`DELETE FROM files WHERE id = ?`);
 
+// --- Express setup ---
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-// Telegram webhook endpoint
+// single webhook endpoint
 app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // Telegram'ga tez javob beramiz
+  res.sendStatus(200); // respond quickly to Telegram
   try {
     const body = req.body;
-    const message = body.message || body.edited_message;
-    if (!message) return;
 
-    const chatId = String(message.chat.id);
-    const text = (message.text || "").trim();
-
-    if (!text) {
-      await sendMessage(chatId, "Iltimos matnli xabar yuboring (qo'shiq yoki artist nomi).");
-      return;
-    }
-
-    if (text === "/start") {
-      await sendMessage(chatId, "🎵 Salom! Menga qo'shiq yoki ijrochi nomini yozing. Men 10 ta variant topaman va siz tanlaysiz.");
-      return;
-    }
-
-    // effekt komandalar
-    if (text === "/zal" || text === "/bass" || text === "/8d") {
-      const effect = text.replace("/", "");
-      // olish oxirgi original fayl
-      const row = getFile.get(chatId);
-      if (!row) {
-        await sendMessage(chatId, "⚠️ Avval original musiqani yuklang (variant tanlang).");
+    // handle callback_query (inline button)
+    if (body.callback_query) {
+      const cq = body.callback_query;
+      const chatId = String(cq.message.chat.id);
+      const data = cq.data; // we use index as callback_data
+      if (!data) {
+        await answerCallback(cq.id, "Noma'lum tanlov");
         return;
       }
-      const originalPath = row.filepath;
+      if (data.startsWith("demo__")) {
+        // demo fallback
+        const idx = parseInt(data.split("__")[1], 10);
+        const title = `Demo Variant ${idx + 1}`;
+        const url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
+        await answerCallback(cq.id, "Yuklanmoqda...");
+        await handleChosenVariant(chatId, idx, title, url, null);
+        return;
+      }
+
+      const idx = parseInt(data, 10);
+      const row = getVariant.get(chatId, idx);
+      if (!row) {
+        await answerCallback(cq.id, "⚠️ Tanlov topilmadi.");
+        return;
+      }
+      await answerCallback(cq.id, `Yuklanmoqda: ${row.title}`);
+      await handleChosenVariant(chatId, idx, row.title, row.url, row.video_id);
+      return;
+    }
+
+    // handle regular message
+    const message = body.message || body.edited_message;
+    if (!message || !message.text) return;
+    const chatId = String(message.chat.id);
+    const text = message.text.trim();
+
+    // commands
+    if (text === "/start") {
+      await sendMessage(chatId, "🎵 Salom! Menga qo‘shiq yoki artist nomini yozing. Men YouTube orqali 10 ta variant topaman.");
+      return;
+    }
+
+    if (text === "/zal" || text === "/bass" || text === "/8d") {
+      const effect = text.replace("/", "");
+      const latest = getLatestOriginal.get(chatId);
+      if (!latest) {
+        await sendMessage(chatId, "⚠️ Avval musiqani yuklang (variant tanlang).");
+        return;
+      }
+      const originalPath = latest.filepath;
       const outName = `${chatId}_${effect}_${Date.now()}.mp3`;
       const outPath = path.join(STORAGE_DIR, outName);
       await sendMessage(chatId, `🎚 ${effect.toUpperCase()} effekti yaratilmoqda...`);
       try {
         await applyEffect(originalPath, outPath, effect);
-        insertFile.run(chatId, "effect", effect, row.title, outPath, Date.now());
-        await sendAudioFile(chatId, outPath, `${effect.toUpperCase()} versiya - ${row.title}`);
-      } catch (err) {
-        console.error("Effect error:", err);
-        await sendMessage(chatId, `❌ Effektda xatolik: ${err.message || err}`);
+        insertFile.run(chatId, "effect", effect, latest.title, outPath, Date.now());
+        await sendAudio(chatId, outPath, `${effect.toUpperCase()} - ${latest.title}`);
+      } catch (e) {
+        console.error("applyEffect error", e);
+        await sendMessage(chatId, `❌ Effektda xatolik: ${e.message || e}`);
       }
       return;
     }
 
-    // agar bu callback_query bilan kelmadi, lekin foydalanuvchi tugma bosishi orqali variant tanlash
-    if (message.reply_to_message && message.text && message.text.startsWith("PICK:")) {
-      // not used; our bot uses inline keyboard callbacks via callback_query endpoint
-      return;
-    }
+    // else: treat as search query -> YouTube search 10 results
+    await sendMessage(chatId, `🔎 "${text}" uchun YouTube'dan qidirilmoqda... Iltimos kuting.`);
 
-    // oddiy matn: qidiruv
-    await sendMessage(chatId, `🔎 "${text}" uchun qidirilmoqda... Iltimos kuting.`);
-
-    // o'zgaruvchilarni o'chirib yangi qidiruvni saqlaymiz
+    // clear previous variants for this chat
     clearVariantsForChat.run(chatId);
 
-    // SerpApi chaqiruv
-    const params = {
-      engine: "google",
-      q: `${text} filetype:mp3`,
-      num: 10,
-      api_key: SERPAPI_KEY,
-    };
+    // yt-search
+    const searchRes = await yts(text);
+    const videos = (searchRes && searchRes.videos) ? searchRes.videos.slice(0, 10) : [];
 
-    const searchRes = await axios.get("https://serpapi.com/search.json", { params });
-    const results = (searchRes.data.organic_results || []).slice(0, 10);
-
-    if (!results.length) {
-      // demo fallback
-      const demoVariants = Array.from({ length: 10 }).map((_, i) => ({
-        title: `${text} Variant ${i + 1}`,
-        link: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+    if (!videos.length) {
+      // fallback demo variants
+      const demo = Array.from({ length: 5 }).map((_, i) => ({
+        title: `${text} Demo ${i+1}`,
+        url: "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3",
+        videoId: null
       }));
-      demoVariants.forEach((v, i) => insertVariant.run(chatId, i, v.title, v.link, Date.now()));
-      await sendMessage(chatId, "⚠️ Onlayn mp3 topilmadi. Demo variantlar yuborildi.");
+      demo.forEach((v, i) => insertVariant.run(chatId, i, v.title, v.videoId, v.url, Date.now()));
+      await sendMessage(chatId, "⚠️ YouTube'dan topilmadi. Demo variantlar yuborildi.");
       await sendVariantsKeyboard(chatId);
       return;
     }
 
-    // saqlash va inline keyboard bilan yuborish
-    results.forEach((r, i) => {
-      const url = r.link || r.url || (r.rich_snippet && r.rich_snippet.top && r.rich_snippet.top.source);
-      const title = r.title || r.snippet || `Variant ${i + 1}`;
-      if (url) insertVariant.run(chatId, i, title, url, Date.now());
+    videos.forEach((v, i) => {
+      const title = v.title;
+      const videoId = v.videoId;
+      const url = `https://www.youtube.com/watch?v=${videoId}`;
+      insertVariant.run(chatId, i, title, videoId, url, Date.now());
     });
 
     await sendVariantsKeyboard(chatId);
@@ -155,64 +174,21 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Telegram callback_query endpoint (webhook will also POST callback_query here in same /webhook body)
-// But Express receives callback_query in /webhook POST body too — handle callback_query inside same webhook handler:
-app.post("/webhook-callback", async (req, res) => {
-  res.sendStatus(200);
-});
-
-// However, Telegram sends callback_query in the same webhook POST; so better parse below:
-app.post("/webhook", async (req, res) => {
-  res.sendStatus(200); // already done above; duplicate safe
-});
-
-// Instead, add separate route for handling callback_query via Telegram's update object:
-// We'll create a middleware that handles callback_query type from webhook (some providers send them together).
-app.post("/updates", async (req, res) => {
-  res.sendStatus(200);
-  const body = req.body;
-  if (body.callback_query) {
-    const cq = body.callback_query;
-    const chatId = String(cq.message.chat.id);
-    const data = cq.data; // expecting index like "0","1",...
-    // if it's demo__ prefix
-    if (data && data.startsWith("demo__")) {
-      const idx = parseInt(data.split("__")[1], 10);
-      const title = `Demo Variant ${idx + 1}`;
-      const url = "https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3";
-      await handleChosenVariant(chatId, idx, title, url);
-      // answer callback (ack)
-      await answerCallbackQuery(cq.id, "Yuklanmoqda...");
-      return;
-    }
-    const idx = parseInt(data, 10);
-    const row = getVariant.get(chatId, idx);
-    if (!row) {
-      await answerCallbackQuery(cq.id, "⚠️ Tanlov topilmadi.");
-      return;
-    }
-    await answerCallbackQuery(cq.id, `Yuklanmoqda: ${row.title}`);
-    await handleChosenVariant(chatId, idx, row.title, row.url);
-  }
-});
-
-// Small helper to answer callback_query
-async function answerCallbackQuery(callback_id, text) {
+// helper: answer callback query
+async function answerCallback(callbackId, text) {
   try {
-    await axios.post(`${BASE_URL}/answerCallbackQuery`, { callback_query_id: callback_id, text });
-  } catch (err) {
-    console.warn("answerCallbackQuery error", err.message || err);
-  }
+    await axios.post(`${BASE_URL}/answerCallbackQuery`, { callback_query_id: callbackId, text });
+  } catch (e) { console.warn("answerCallback error", e.message || e); }
 }
 
-// yuborish: variantlarni inline keyboard bilan yuborish
+// send inline keyboard of variants
 async function sendVariantsKeyboard(chatId) {
   const rows = getVariantsForChat.all(chatId);
-  if (!rows || !rows.length) {
+  if (!rows || rows.length === 0) {
     await sendMessage(chatId, "❌ Variantlar topilmadi.");
     return;
   }
-  const inline = rows.map((r) => [{ text: r.title.substring(0, 60), callback_data: String(r.idx) }]);
+  const inline = rows.map(r => [{ text: r.title.substring(0, 60), callback_data: String(r.idx) }]);
   await axios.post(`${BASE_URL}/sendMessage`, {
     chat_id: Number(chatId),
     text: "🎶 Quyidagi variantlardan birini tanlang:",
@@ -220,57 +196,63 @@ async function sendVariantsKeyboard(chatId) {
   });
 }
 
-// handler: user tanlagan variant (yuklab olish, originalni yuborish va DB saqlash)
-async function handleChosenVariant(chatId, idx, title, url) {
+// download chosen variant: if videoId provided use yt-dlp, else try direct URL stream
+async function handleChosenVariant(chatId, idx, title, url, videoId) {
   try {
     await sendMessage(chatId, `⬇️ '${title}' yuklanmoqda...`);
-    // yuklab oling
-    const res = await axios.get(url, { responseType: "stream", timeout: 30000 });
-    // check size header
-    const contentLength = res.headers["content-length"] ? parseInt(res.headers["content-length"], 10) : null;
-    if (contentLength && contentLength > 50 * 1024 * 1024) {
-      await sendMessage(chatId, "❌ Fayl juda katta (max 50MB). Iltimos boshqa variant tanlang.");
+
+    // determine output path
+    const safeTitle = title.replace(/[^a-zA-Z0-9_\- ]/g, "").slice(0, 60);
+    const filename = `${chatId}_original_${videoId ? videoId : Date.now()}.mp3`;
+    const filepath = path.join(STORAGE_DIR, filename);
+
+    if (videoId) {
+      // use yt-dlp to download audio as mp3
+      // output template uses %(ext)s, but we set .mp3 by audio-format
+      const cmd = `yt-dlp -q -f bestaudio --extract-audio --audio-format mp3 -o "${path.join(STORAGE_DIR, `${chatId}_original_${videoId}.%(ext)s`)}" "https://www.youtube.com/watch?v=${videoId}"`;
+      await exec(cmd, { maxBuffer: 1024 * 1024 * 50 });
+    } else {
+      // fallback: direct download via axios stream
+      const res = await axios.get(url, { responseType: "stream", timeout: 30000 });
+      const writer = fs.createWriteStream(filepath);
+      await new Promise((resolve, reject) => {
+        res.data.pipe(writer);
+        let err = null;
+        writer.on("error", e => { err = e; writer.close(); reject(e); });
+        writer.on("close", () => { if (!err) resolve(); });
+      });
+    }
+
+    // compute final mp3 path when videoId used
+    const finalPath = videoId ? path.join(STORAGE_DIR, `${chatId}_original_${videoId}.mp3`) : filepath;
+
+    // double-check file exists and size
+    if (!fs.existsSync(finalPath)) {
+      await sendMessage(chatId, "❌ Yuklashda muammo bo‘ldi: fayl topilmadi.");
       return;
     }
-    const filename = `${chatId}_original_${Date.now()}.mp3`;
-    const filepath = path.join(STORAGE_DIR, filename);
-    const writer = fs.createWriteStream(filepath);
-    await new Promise((resolve, reject) => {
-      res.data.pipe(writer);
-      let error = null;
-      writer.on("error", (err) => {
-        error = err; writer.close(); reject(err);
-      });
-      writer.on("close", () => {
-        if (!error) resolve();
-      });
-    });
+    const stats = fs.statSync(finalPath);
+    if (stats.size < 1000) {
+      await sendMessage(chatId, "❌ Yuklangan fayl juda kichik, boshqa variant tanlang.");
+      return;
+    }
 
-    // DBga saqlash
-    insertFile.run(chatId, "original", null, title, filepath, Date.now());
+    // save record to DB
+    insertFile.run(chatId, "original", null, title, finalPath, Date.now());
 
-    // yuborish
-    await sendAudioFile(chatId, filepath, title);
+    // send original audio to user
+    await sendAudio(chatId, finalPath, title);
 
-    await sendMessage(chatId, "✅ Yuklandi! Endi effekt tanlang:\n/zal — Zal effekti\n/bass — Bass effekti\n/8d — 8D effekti");
+    await sendMessage(chatId, "✅ Yuklandi! Endi effekt tanlang:\n/zal — Zal\n/bass — Bass\n/8d — 8D");
 
   } catch (err) {
     console.error("handleChosenVariant error:", err);
-    await sendMessage(chatId, `❌ Yuklash vaqti xatolik: ${err.message || err}`);
+    await sendMessage(chatId, `❌ Yuklashda xatolik: ${err.message || err}`);
   }
 }
 
-// send simple text message
-async function sendMessage(chatId, text) {
-  try {
-    await axios.post(`${BASE_URL}/sendMessage`, { chat_id: Number(chatId), text, parse_mode: "HTML" });
-  } catch (err) {
-    console.warn("sendMessage failed:", err.message || err);
-  }
-}
-
-// send audio by multipart/form-data
-async function sendAudioFile(chatId, filePath, title) {
+// send audio file by multipart/form-data
+async function sendAudio(chatId, filePath, title) {
   try {
     const form = new FormData();
     form.append("chat_id", chatId);
@@ -278,55 +260,39 @@ async function sendAudioFile(chatId, filePath, title) {
     form.append("audio", fs.createReadStream(filePath));
     await axios.post(`${BASE_URL}/sendAudio`, form, { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity });
   } catch (err) {
-    console.error("sendAudioFile error:", err.message || err);
-    // fallback: give URL or error message
+    console.error("sendAudio error", err.message || err);
     await sendMessage(chatId, "⚠️ Audio yuborishda xatolik yuz berdi.");
   }
 }
 
-// apply ffmpeg effect
+// apply audio effects with ffmpeg
 function applyEffect(inputPath, outputPath, type) {
   return new Promise((resolve, reject) => {
-    let command = ffmpeg(inputPath).output(outputPath).audioCodec("libmp3lame");
-
-    if (type === "zal") {
-      command.audioFilters("aecho=0.8:0.9:1000:0.3");
-    } else if (type === "bass") {
-      // bass filter: boost low frequencies
-      command.audioFilters("bass=g=10");
-    } else if (type === "8d") {
-      // 8D-like effect using apulsator or stereo panning
-      // prefer apulsator if available, else use stereoize + pan
-      command.audioFilters("apulsator=hz=0.125");
-    } else {
-      return reject(new Error("Unknown effect"));
-    }
-
-    command.on("end", () => resolve()).on("error", (err) => reject(err)).run();
+    let cmd = ffmpeg(inputPath).output(outputPath).audioCodec("libmp3lame");
+    if (type === "zal") cmd.audioFilters("aecho=0.8:0.9:1000:0.3");
+    else if (type === "bass") cmd.audioFilters("bass=g=10");
+    else if (type === "8d") cmd.audioFilters("apulsator=hz=0.125");
+    else return reject(new Error("Noma'lum effekt"));
+    cmd.on("end", resolve).on("error", reject).run();
   });
 }
 
-// FILE CLEANUP: fayllarni 24 soatdan (86400*1000 ms) eski bo'lsa o'chiradi
+// cleanup files older than 24 hours
 setInterval(() => {
   try {
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    const olds = deleteOldFiles.all(cutoff);
-    olds.forEach((r) => {
+    const olds = getFilesOlderThan.all(cutoff);
+    olds.forEach(r => {
       try {
         if (fs.existsSync(r.filepath)) fs.unlinkSync(r.filepath);
-        // ham DB yozuvini ham o'chirish
-        db.prepare(`DELETE FROM files WHERE id = ?`).run(r.id);
-      } catch (e) {
-        console.warn("cleanup file error", e.message || e);
-      }
+        deleteFileById.run(r.id);
+      } catch (e) { console.warn("cleanup err", e.message || e); }
     });
-    // ham search_variants ham kerak bo'lsa eski yozuvlar uchun tozalash qilinishi mumkin (lekin talab bo'lmasa qoldiramiz)
-  } catch (e) {
-    console.error("cleanup interval error", e);
-  }
-}, 60 * 60 * 1000); // har 1 soatda tekshiradi
+  } catch (e) { console.error("cleanup interval error", e); }
+}, 60 * 60 * 1000); // hourly
 
-// start Express
-app.listen(PORT, () => {
-  console.log(`Server ishlayapti port ${PORT}`);
-});
+// health check root
+app.get("/", (req, res) => res.send("Bot ishlayapti ✅"));
+
+// start server
+app.listen(PORT, () => console.log(`Server ishlayapti port ${PORT}`));

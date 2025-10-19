@@ -17,7 +17,7 @@ COPY . .
 RUN mkdir -p /data/files
 VOLUME ["/data/files"]
 
-ENV PORT=10000
+ENV PORT=3000
 EXPOSE 10000
 
 CMD ["npm", "start"]

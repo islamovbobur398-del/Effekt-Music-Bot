@@ -1,3 +1,4 @@
+// index.js
 import express from "express";
 import axios from "axios";
 import fs from "fs";
@@ -56,14 +57,14 @@ const deleteOldFiles = db.prepare(`SELECT * FROM files WHERE created_at <= ?`);
 const app = express();
 app.use(express.json());
 
-// --- Webhook ---
+// --- Webhook faqat bitta joyda ishlaydi ---
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
   try {
     const body = req.body;
 
-    // Callback query
+    // 1️⃣ Agar callback_query bo‘lsa (variant tugmasi bosilgan)
     if (body.callback_query) {
       const cq = body.callback_query;
       const chatId = String(cq.message.chat.id);
@@ -79,7 +80,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    // Oddiy xabar
+    // 2️⃣ Agar oddiy xabar bo‘lsa
     const message = body.message;
     if (!message || !message.text) return;
     const chatId = String(message.chat.id);
@@ -90,7 +91,7 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
-    if (["/zal", "/bass", "/8d"].includes(text)) {
+    if (text === "/zal" || text === "/bass" || text === "/8d") {
       const effect = text.replace("/", "");
       const row = getFile.get(chatId);
       if (!row) {
@@ -106,7 +107,6 @@ app.post("/webhook", async (req, res) => {
         insertFile.run(chatId, "effect", effect, row.title, outPath, Date.now());
         await sendAudioFile(chatId, outPath, `${effect.toUpperCase()} versiya - ${row.title}`);
       } catch (err) {
-        console.error("Effekt xatolik:", err);
         await sendMessage(chatId, `❌ Effektda xatolik: ${err.message}`);
       }
       return;
@@ -142,13 +142,13 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// --- Telegram javob funksiyalari ---
+// --- Telegramga javob yuborish funksiyalari ---
 async function answerCallbackQuery(id, text) {
   await axios.post(`${BASE_URL}/answerCallbackQuery`, { callback_query_id: id, text }).catch(() => {});
 }
 
 async function sendMessage(chatId, text) {
-  await axios.post(`${BASE_URL}/sendMessage`, { chat_id: chatId, text }).catch(err => console.error("sendMessage xato:", err));
+  await axios.post(`${BASE_URL}/sendMessage`, { chat_id: chatId, text });
 }
 
 async function sendVariantsKeyboard(chatId) {
@@ -159,7 +159,7 @@ async function sendVariantsKeyboard(chatId) {
     chat_id: chatId,
     text: "🎶 Quyidagi variantlardan birini tanlang:",
     reply_markup: { inline_keyboard }
-  }).catch(err => console.error("sendVariantsKeyboard xato:", err));
+  });
 }
 
 async function handleChosenVariant(chatId, idx, title, url) {
@@ -167,33 +167,22 @@ async function handleChosenVariant(chatId, idx, title, url) {
     const res = await axios.get(url, { responseType: "stream" });
     const filepath = path.join(STORAGE_DIR, `${chatId}_original_${Date.now()}.mp3`);
     const writer = fs.createWriteStream(filepath);
-
-    await new Promise((resolve, reject) => {
-      res.data.pipe(writer);
-      writer.on("finish", resolve);
-      writer.on("error", reject);
-      res.data.on("error", reject);
-    });
-
+    res.data.pipe(writer);
+    await new Promise(resolve => writer.on("finish", resolve));
     insertFile.run(chatId, "original", null, title, filepath, Date.now());
     await sendAudioFile(chatId, filepath, title);
     await sendMessage(chatId, "✅ Endi effekt tanlang:\n/zal\n/bass\n/8d");
   } catch (err) {
-    console.error("Yuklash xatolik:", err);
     await sendMessage(chatId, `❌ Yuklash xatosi: ${err.message}`);
   }
 }
 
 async function sendAudioFile(chatId, filePath, title) {
-  try {
-    const form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("title", title);
-    form.append("audio", fs.createReadStream(filePath));
-    await axios.post(`${BASE_URL}/sendAudio`, form, { headers: form.getHeaders() }).catch(err => console.error("sendAudioFile xato:", err));
-  } catch (err) {
-    console.error("sendAudioFile global xato:", err);
-  }
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("title", title);
+  form.append("audio", fs.createReadStream(filePath));
+  await axios.post(`${BASE_URL}/sendAudio`, form, { headers: form.getHeaders() }).catch(() => {});
 }
 
 // --- Effekt funksiyasi ---
@@ -204,14 +193,7 @@ function applyEffect(inputPath, outputPath, type) {
     else if (type === "bass") command.audioFilters("bass=g=10");
     else if (type === "8d") command.audioFilters("apulsator=hz=0.125");
     else return reject(new Error("Noma’lum effekt"));
-
-    command
-      .on("end", resolve)
-      .on("error", err => {
-        console.error("ffmpeg xato:", err);
-        reject(err);
-      })
-      .run();
+    command.on("end", resolve).on("error", reject).run();
   });
 }
 
@@ -223,9 +205,7 @@ setInterval(() => {
     try {
       if (fs.existsSync(r.filepath)) fs.unlinkSync(r.filepath);
       db.prepare("DELETE FROM files WHERE id = ?").run(r.id);
-    } catch (err) {
-      console.error("Fayl o‘chirish xato:", err);
-    }
+    } catch {}
   });
 }, 60 * 60 * 1000);
 

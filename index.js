@@ -10,7 +10,7 @@ import ffmpeg from "fluent-ffmpeg";
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
 const BASE_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 const STORAGE_DIR = process.env.STORAGE_DIR || "/data/files"; // Docker konteynerda mavjud bo'lishi kerak
 
 if (!BOT_TOKEN || !SERPAPI_KEY) {

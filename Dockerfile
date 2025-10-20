@@ -1,5 +1,5 @@
 # Node 18 asosida
-FROM node:18
+FROM node:20
 
 # Ishchi papka
 WORKDIR /app

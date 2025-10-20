@@ -4,10 +4,3 @@ services:
     env: docker
     plan: free
     autoDeploy: true
-    region: frankfurt
-
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: STORAGE_DIR
-        value: /data/files

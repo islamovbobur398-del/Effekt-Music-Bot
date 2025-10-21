@@ -176,7 +176,7 @@ async function handleChosenVariant(chatId, idx, title, url, videoId) {
     const filename = `${chatId}_original_${videoId}.mp3`;
     const filepath = path.join(STORAGE_DIR, filename);
 
-    const cmd = `yt-dlp -x --audio-format mp3 -o "${filepath}" "${url}"`;
+    const cmd = `yt-dlp -x --audio-format mp3 --cookies /app/cookies.txt -o "${outputPath}" "${text}"`;
     await exec(cmd, { maxBuffer: 1024 * 1024 * 50 });
 
     if (!fs.existsSync(filepath)) throw new Error("Yuklangan fayl topilmadi.");

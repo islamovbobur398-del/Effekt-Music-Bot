@@ -103,7 +103,7 @@ app.post("/webhook", async (req, res) => {
     const text = message.text.trim();
 
     if (text === "/start") {
-      await sendMessage(chatId, "🎵 Salom! Menga qo‘shiq nomini yozing, men YouTube’dan 10 ta variant topaman.");
+      await sendMessage(chatId, "🎵 Salom! Menga qo‘shiq nomini yozing,siz izlagan qoʻshiqni topaman va zal.Bass.8D effektga aylantraman😎.");
       return;
     }
 

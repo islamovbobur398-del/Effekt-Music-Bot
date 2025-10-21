@@ -170,13 +170,15 @@ async function sendVariantsKeyboard(chatId) {
   });
 }
 
+// ✅ To‘liq to‘g‘rilangan yuklash funksiyasi
 async function handleChosenVariant(chatId, idx, title, url, videoId) {
   try {
     await sendMessage(chatId, `⬇️ '${title}' yuklanmoqda...`);
+
     const filename = `${chatId}_original_${videoId}.mp3`;
     const filepath = path.join(STORAGE_DIR, filename);
 
-    const cmd = `yt-dlp -x --audio-format mp3 --cookies /app/cookies.txt -o "${outputPath}" "${text}"`;
+    const cmd = `yt-dlp -x --audio-format mp3 --cookies /app/cookies.txt -o "${filepath}" "${url}"`;
     await exec(cmd, { maxBuffer: 1024 * 1024 * 50 });
 
     if (!fs.existsSync(filepath)) throw new Error("Yuklangan fayl topilmadi.");

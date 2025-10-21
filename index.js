@@ -105,7 +105,7 @@ app.post("/webhook", async (req, res) => {
     }
 
     // === YT SEARCH ===
-    await sendMessage(chatId, `🔎 "${text}" uchun YouTube'dan qidirilmoqda...`);
+    await sendMessage(chatId, `🔎 "${text}" mp3 yuklanmoqda...`);
     clearVariantsForChat.run(chatId);
     const yts = (await import("yt-search")).default;
     const result = await yts(text);

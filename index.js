@@ -1,4 +1,5 @@
-// index.js
+// index.js — TEZLIK VA BARQARORLIK UCHUN OPTIMALLASHTIRILGAN
+
 import express from "express";
 import axios from "axios";
 import fs from "fs";
@@ -8,24 +9,24 @@ import Database from "better-sqlite3";
 import ffmpeg from "fluent-ffmpeg";
 import { promisify } from "util";
 import { exec as execCb } from "child_process";
-import yts from "yt-search";
 
 const exec = promisify(execCb);
+axios.defaults.timeout = 60000; // 60 sekund — sekin tarmoq uchun kutish vaqti
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 10000;
 const STORAGE_DIR = process.env.STORAGE_DIR || "/data/files";
+const COOKIES_PATH = "/app/cookies.txt";
 
 if (!BOT_TOKEN) {
-  console.error("❌ BOT_TOKEN environment variable not set!");
+  console.error("❌ BOT_TOKEN belgilanmagan!");
   process.exit(1);
 }
 
 if (!fs.existsSync(STORAGE_DIR)) fs.mkdirSync(STORAGE_DIR, { recursive: true });
-
 const BASE_URL = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// --- Database setup ---
+// === DATABASE ===
 const dbPath = path.join(STORAGE_DIR, "bot.db");
 const db = new Database(dbPath);
 
@@ -39,8 +40,6 @@ CREATE TABLE IF NOT EXISTS search_variants (
   url TEXT,
   created_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_chat ON search_variants(chat_id);
-
 CREATE TABLE IF NOT EXISTS files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT,
@@ -50,20 +49,18 @@ CREATE TABLE IF NOT EXISTS files (
   filepath TEXT,
   created_at INTEGER
 );
-CREATE INDEX IF NOT EXISTS idx_files_chat ON files(chat_id);
 `);
 
 const insertVariant = db.prepare(`INSERT INTO search_variants (chat_id, idx, title, video_id, url, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
 const clearVariantsForChat = db.prepare(`DELETE FROM search_variants WHERE chat_id = ?`);
 const getVariantsForChat = db.prepare(`SELECT idx, title, video_id, url FROM search_variants WHERE chat_id = ? ORDER BY idx ASC`);
-const getVariant = db.prepare(`SELECT idx, title, video_id, url FROM search_variants WHERE chat_id = ? AND idx = ? LIMIT 1`);
-
+const getVariant = db.prepare(`SELECT * FROM search_variants WHERE chat_id = ? AND idx = ? LIMIT 1`);
 const insertFile = db.prepare(`INSERT INTO files (chat_id, kind, effect, title, filepath, created_at) VALUES (?, ?, ?, ?, ?, ?)`);
-const getLatestOriginal = db.prepare(`SELECT * FROM files WHERE chat_id = ? AND kind = 'original' ORDER BY created_at DESC LIMIT 1`);
+const getLatestOriginal = db.prepare(`SELECT * FROM files WHERE chat_id = ? AND kind='original' ORDER BY created_at DESC LIMIT 1`);
 const getFilesOlderThan = db.prepare(`SELECT * FROM files WHERE created_at <= ?`);
-const deleteFileById = db.prepare(`DELETE FROM files WHERE id = ?`);
+const deleteFileById = db.prepare(`DELETE FROM files WHERE id=?`);
 
-// --- Express setup ---
+// === EXPRESS ===
 const app = express();
 app.use(express.json());
 
@@ -78,86 +75,81 @@ app.post("/webhook", async (req, res) => {
       const chatId = String(cq.message.chat.id);
       const data = cq.data;
 
-      if (!data) {
-        await answerCallback(cq.id, "Noma'lum tanlov");
-        return;
-      }
-
-      const idx = parseInt(data, 10);
-      const row = getVariant.get(chatId, idx);
-
-      if (!row) {
-        await answerCallback(cq.id, "⚠️ Tanlov topilmadi.");
-        return;
-      }
+      const row = getVariant.get(chatId, parseInt(data, 10));
+      if (!row) return answerCallback(cq.id, "Tanlov topilmadi.");
 
       await answerCallback(cq.id, `Yuklanmoqda: ${row.title}`);
-      await handleChosenVariant(chatId, idx, row.title, row.url, row.video_id);
+      await handleDownload(chatId, row.title, row.url, row.video_id);
       return;
     }
 
-    const message = body.message;
-    if (!message || !message.text) return;
-
-    const chatId = String(message.chat.id);
-    const text = message.text.trim();
+    const msg = body.message;
+    if (!msg || !msg.text) return;
+    const chatId = String(msg.chat.id);
+    const text = msg.text.trim();
 
     if (text === "/start") {
-      await sendMessage(chatId, "🎵 Salom! Menga qo‘shiq nomini yozing,siz izlagan qoʻshiqni topaman va zal.Bass.8D effektga aylantraman😎.");
-      return;
+      return sendMessage(chatId, "🎵 Salom! botni vazifasi muzikani topish va Zal.Bass.8D effektga aylantrish.");
     }
 
     if (["/zal", "/bass", "/8d"].includes(text)) {
       const effect = text.slice(1);
       const latest = getLatestOriginal.get(chatId);
-      if (!latest) {
-        await sendMessage(chatId, "⚠️ Avval musiqani yuklang.");
-        return;
-      }
+      if (!latest) return sendMessage(chatId, "⚠️ Avval musiqani yuklang.");
 
-      const originalPath = latest.filepath;
-      const outPath = path.join(STORAGE_DIR, `${chatId}_${effect}_${Date.now()}.mp3`);
-
+      const output = path.join(STORAGE_DIR, `${chatId}_${effect}_${Date.now()}.mp3`);
       await sendMessage(chatId, `🎚 ${effect.toUpperCase()} effekti yaratilmoqda...`);
-      try {
-        await applyEffect(originalPath, outPath, effect);
-        insertFile.run(chatId, "effect", effect, latest.title, outPath, Date.now());
-        await sendAudio(chatId, outPath, `${effect.toUpperCase()} - ${latest.title}`);
-      } catch (e) {
-        await sendMessage(chatId, `❌ Effektda xatolik: ${e.message}`);
-      }
-      return;
+      await applyEffect(latest.filepath, output, effect);
+      insertFile.run(chatId, "effect", effect, latest.title, output, Date.now());
+      return sendAudio(chatId, output, `${effect.toUpperCase()} - ${latest.title}`);
     }
 
-    // === QIDIRUV ===
+    // === YT SEARCH ===
     await sendMessage(chatId, `🔎 "${text}" uchun YouTube'dan qidirilmoqda...`);
     clearVariantsForChat.run(chatId);
+    const yts = (await import("yt-search")).default;
+    const result = await yts(text);
+    const vids = result.videos.slice(0, 10);
 
-    const searchRes = await yts(text);
-    const videos = searchRes.videos.slice(0, 10);
+    if (!vids.length) return sendMessage(chatId, "❌ Natija topilmadi.");
 
-    if (!videos.length) {
-      await sendMessage(chatId, "❌ Natija topilmadi.");
-      return;
-    }
-
-    videos.forEach((v, i) => {
-      insertVariant.run(chatId, i, v.title, v.videoId, v.url, Date.now());
-    });
-
+    vids.forEach((v, i) => insertVariant.run(chatId, i, v.title, v.videoId, v.url, Date.now()));
     await sendVariantsKeyboard(chatId);
-  } catch (err) {
-    console.error("Webhook xato:", err);
+  } catch (e) {
+    console.error("Webhook xato:", e);
   }
 });
 
-// === Yordamchi funksiyalar ===
-async function answerCallback(id, text) {
-  await axios.post(`${BASE_URL}/answerCallbackQuery`, { callback_query_id: id, text });
+// === ASOSIY FUNKSIYALAR ===
+async function handleDownload(chatId, title, url, videoId) {
+  try {
+    await sendMessage(chatId, `⬇️ Yuklanmoqda: ${title}`);
+    const filepath = path.join(STORAGE_DIR, `${chatId}_original_${videoId}.mp3`);
+
+    const cmd = `yt-dlp -x --audio-format mp3 --limit-rate 1M --no-warnings --cookies ${COOKIES_PATH} -o "${filepath}" "${url}"`;
+    await exec(cmd, { maxBuffer: 1024 * 1024 * 100 });
+
+    if (!fs.existsSync(filepath)) throw new Error("Fayl topilmadi.");
+
+    insertFile.run(chatId, "original", null, title, filepath, Date.now());
+    await sendAudio(chatId, filepath, title);
+    await sendMessage(chatId, "✅ Endi effekt tanlang: /zal /bass /8d");
+  } catch (err) {
+    console.error("Yuklash xatosi:", err.message);
+    await sendMessage(chatId, `❌ Yuklashda xatolik: ${err.message}`);
+  }
 }
 
 async function sendMessage(chatId, text) {
   await axios.post(`${BASE_URL}/sendMessage`, { chat_id: chatId, text });
+}
+
+async function sendAudio(chatId, filePath, title) {
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("title", title);
+  form.append("audio", fs.createReadStream(filePath));
+  await axios.post(`${BASE_URL}/sendAudio`, form, { headers: form.getHeaders() });
 }
 
 async function sendVariantsKeyboard(chatId) {
@@ -168,36 +160,6 @@ async function sendVariantsKeyboard(chatId) {
     text: "🎶 Quyidagi variantlardan birini tanlang:",
     reply_markup: { inline_keyboard: inline },
   });
-}
-
-// ✅ To‘liq to‘g‘rilangan yuklash funksiyasi
-async function handleChosenVariant(chatId, idx, title, url, videoId) {
-  try {
-    await sendMessage(chatId, `⬇️ '${title}' yuklanmoqda...`);
-
-    const filename = `${chatId}_original_${videoId}.mp3`;
-    const filepath = path.join(STORAGE_DIR, filename);
-
-    const cmd = `yt-dlp -x --audio-format mp3 --cookies /app/cookies.txt -o "${filepath}" "${url}"`;
-    await exec(cmd, { maxBuffer: 1024 * 1024 * 50 });
-
-    if (!fs.existsSync(filepath)) throw new Error("Yuklangan fayl topilmadi.");
-
-    insertFile.run(chatId, "original", null, title, filepath, Date.now());
-    await sendAudio(chatId, filepath, title);
-    await sendMessage(chatId, "✅ Endi effekt tanlang: /zal /bass /8d");
-  } catch (e) {
-    console.error("Yuklash xatosi:", e);
-    await sendMessage(chatId, `❌ Yuklashda xatolik: ${e.message}`);
-  }
-}
-
-async function sendAudio(chatId, filePath, title) {
-  const form = new FormData();
-  form.append("chat_id", chatId);
-  form.append("title", title);
-  form.append("audio", fs.createReadStream(filePath));
-  await axios.post(`${BASE_URL}/sendAudio`, form, { headers: form.getHeaders() });
 }
 
 function applyEffect(input, output, type) {
@@ -211,9 +173,13 @@ function applyEffect(input, output, type) {
   });
 }
 
-// === FAYL TOZALOVCHI ===
+async function answerCallback(id, text) {
+  await axios.post(`${BASE_URL}/answerCallbackQuery`, { callback_query_id: id, text });
+}
+
+// === FAYLLARNI TOZALASH ===
 setInterval(() => {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - 6 * 60 * 60 * 1000; // 6 soatdan eski fayllar
   const olds = getFilesOlderThan.all(cutoff);
   olds.forEach(r => {
     try {
@@ -221,7 +187,7 @@ setInterval(() => {
       deleteFileById.run(r.id);
     } catch {}
   });
-}, 60 * 60 * 1000);
+}, 2 * 60 * 60 * 1000);
 
 app.get("/", (req, res) => res.send("Bot ishlayapti ✅"));
-app.listen(PORT, () => console.log(`Server port ${PORT} da ishlayapti`));
+app.listen(PORT, () => console.log(`🚀 Server port ${PORT} da ishlayapti`));

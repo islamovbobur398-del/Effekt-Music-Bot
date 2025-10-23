@@ -92,10 +92,10 @@ app.post("/webhook", async (req, res) => {
     await sendTyping(chatId); // 🔹 typing animatsiya har doim foydalanuvchiga javobdan oldin
 
     if (text === "/start") {
-      return sendMessage(chatId, "🎵 Salom! Bot musiqani topib, Zal, Bass va 8D effektlarga aylantiradi.");
+      return sendMessage(chatId, "🎵 Salom! Bot musiqani topib, club, Bass va 8D effektlarga aylantiradi.");
     }
 
-    if (["/zal", "/bass", "/8d"].includes(text)) {
+    if (["/club", "/bass", "/8d"].includes(text)) {
       const effect = text.slice(1);
       const latest = getLatestOriginal.get(chatId);
       if (!latest) return sendMessage(chatId, "⚠️ Avval musiqani yuklang.");
@@ -139,7 +139,7 @@ async function handleDownload(chatId, title, url, videoId) {
 
     insertFile.run(chatId, "original", null, title, filepath, Date.now());
     await sendAudio(chatId, filepath, title);
-    await sendMessage(chatId, "✅ Endi effekt tanlang: /zal /bass /8d");
+    await sendMessage(chatId, "✅ Endi effekt tanlang: /club /bass /8d");
   } catch (err) {
     console.error("Yuklash xatosi:", err.message);
     await sendMessage(chatId, `❌ Yuklashda xatolik: ${err.message}`);

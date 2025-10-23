@@ -183,7 +183,7 @@ async function sendVariantsKeyboard(chatId) {
 function applyEffect(input, output, type) {
   return new Promise((resolve, reject) => {
     let cmd = ffmpeg(input).output(output).audioCodec("libmp3lame");
-    if (type === "zal") cmd.audioFilters("aecho=0.8:0.9:1000:0.3");
+    if (type === "club") cmd.audioFilters("aecho=0.8:0.9:1000:0.3");
     else if (type === "bass") cmd.audioFilters("bass=g=10");
     else if (type === "8d") cmd.audioFilters("apulsator=hz=0.125");
     else return reject(new Error("Noma'lum effekt"));
